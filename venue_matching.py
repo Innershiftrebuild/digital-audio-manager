@@ -46,7 +46,45 @@ class DAMVenueMatcher:
 
     v1 functions (calculate_match_score, build_custom_pitch_draft) are
     unchanged in behavior.
+
+    v2.1 (2026-11-24) adds the artist side of content policy: an artist
+    declares one of three categories — originals, covers, or mixed — and
+    matching pairs it against the venue's content policy. A mixed artist
+    fits any room; an originals artist never lands in a covers-only room,
+    and a covers artist never lands in an originals-only room.
     """
+
+    # Artist content categories — what the artist plays. The artist side of
+    # content policy (added 2026-11-24, per Rich): every artist declares one
+    # of three categories, and matching pairs it against the venue's policy.
+    #   originals — the artist plays only their own songs (Rich's own case)
+    #   covers    — the artist plays other people's songs
+    #   mixed     — a variety of both originals and covers
+    ARTIST_CONTENT_CATEGORIES = ("originals", "covers", "mixed")
+
+    @staticmethod
+    def validate_content_category(category: str) -> str:
+        """Normalize and validate an artist content category."""
+        key = category.strip().lower()
+        if key not in DAMVenueMatcher.ARTIST_CONTENT_CATEGORIES:
+            raise ValueError(
+                f"Unknown artist content category: {category!r} — "
+                f"use one of: {', '.join(DAMVenueMatcher.ARTIST_CONTENT_CATEGORIES)}."
+            )
+        return key
+
+    @staticmethod
+    def content_fits(artist_category: str, venue_policy: str) -> bool:
+        """True when an artist of this category fits a venue of this policy.
+        - originals artist: originals or mixed rooms only
+        - covers artist: covers or mixed rooms only
+        - mixed artist: any room
+        """
+        category = DAMVenueMatcher.validate_content_category(artist_category)
+        policy = venue_policy.strip().lower()
+        if category == "mixed":
+            return True
+        return category == policy
 
     # Known city coordinates for location entry by name (latitude, longitude).
     # A musician can type a city from this table, or pass coordinates directly.
@@ -194,14 +232,18 @@ class DAMVenueMatcher:
             "match_analysis": reasons
         }
 
-    def build_custom_pitch_draft(self, artist_name: str, artist_genre: str, venue_id: str) -> str:
+    def build_custom_pitch_draft(
+        self, artist_name: str, artist_genre: str, venue_id: str, artist_category: str = "originals"
+    ) -> str:
         """Generates a professional, automated pitch message tailored to the venue's audience."""
         venue = self.VENUE_DIRECTORY[venue_id]
+        category = self.validate_content_category(artist_category)
+        plays = {"originals": "original", "covers": "cover", "mixed": "original and cover"}[category]
 
         pitch = (
             f"Subject: Booking Inquiry: {artist_name} ({artist_genre.title()}) @ {venue['name']}\n\n"
             f"Hi {venue['name']} Booking Team,\n\n"
-            f"I hope this message finds you well. My name is {artist_name}, performing original {artist_genre} music. "
+            f"I hope this message finds you well. My name is {artist_name}, performing {plays} {artist_genre} music. "
             f"Given your room's reputation for {venue['vibe_audience']}, I am confident my performance would resonate strongly with your audience.\n\n"
             f"I have assembled a secure, private DAM submission package containing our media sampler and technical rider for your review.\n\n"
             f"Thank you for your time and consideration,\n"
@@ -218,38 +260,54 @@ class DAMVenueMatcher:
         radius_miles: float,
         artist_genre: str,
         artist_setup: str,
+        artist_category: str = "mixed",
         originals_only: bool = False,
     ) -> List[Dict]:
         """
         Find venues within radius_miles of the artist, ranked by match.
 
+        artist_category is what the artist plays: "originals", "covers", or
+        "mixed" (a variety of both). It is paired against each venue's
+        content_policy — an originals artist never lands in a covers-only
+        room, and a covers artist never lands in an originals-only room.
+        A mixed artist fits any room. originals_only=True is kept for
+        backward compatibility and means artist_category="originals".
+
         Hard filters (a venue failing either is excluded entirely):
         - distance beyond the radius
-        - originals_only artist vs a covers-only venue
+        - artist category vs venue content policy mismatch
 
         Each result carries the venue's full profile — distance, content
         policy, pay, run_by, played_by, vouched_by — so the musician can
         get familiar with the room before pitching it.
         """
+        category = "originals" if originals_only else self.validate_content_category(artist_category)
         results = []
 
         for venue_id, venue in self.VENUE_DIRECTORY.items():
             dist = self.distance_miles(artist_lat, artist_lon, venue["lat"], venue["lon"])
             if dist > radius_miles:
                 continue
-            if originals_only and venue["content_policy"] == "covers":
+            if not self.content_fits(category, venue["content_policy"]):
                 continue
 
             base = self.calculate_match_score(artist_genre, artist_setup, venue_id)
             score = base["match_score_pct"]
             reasons = list(base["match_analysis"])
 
-            # Content-policy fit
-            if originals_only and venue["content_policy"] == "originals":
+            # Content-policy fit: the artist's category against the room's policy.
+            if category == "originals" and venue["content_policy"] == "originals":
                 score += 10
                 reasons.append("Content match: venue books originals, and this artist plays originals only.")
-            elif originals_only and venue["content_policy"] == "mixed":
+            elif category == "originals" and venue["content_policy"] == "mixed":
                 reasons.append("Content note: venue is mixed originals/covers — originals are accepted.")
+            elif category == "covers" and venue["content_policy"] == "covers":
+                score += 10
+                reasons.append("Content match: venue books covers, and this artist plays covers.")
+            elif category == "covers" and venue["content_policy"] == "mixed":
+                reasons.append("Content note: venue is mixed originals/covers — covers are accepted.")
+            elif category == "mixed":
+                reasons.append(f"Content note: venue books {venue['content_policy']} — a mixed artist fits any room.")
 
             results.append({
                 "venue_id": venue_id,
@@ -258,6 +316,7 @@ class DAMVenueMatcher:
                 "distance_miles": round(dist, 1),
                 "match_score_pct": score,
                 "content_policy": venue["content_policy"],
+                "artist_category": category,
                 "pay": venue["pay"],
                 "run_by": venue["run_by"] or "Not yet recorded",
                 "played_by": venue["played_by"],
@@ -279,11 +338,12 @@ class DAMVenueMatcher:
         radius_miles: float,
         artist_genre: str,
         artist_setup: str,
+        artist_category: str = "mixed",
         originals_only: bool = False,
     ) -> List[Dict]:
         """search_venues with the artist's location typed in as a city name."""
         lat, lon = self.coords_for_city(city)
-        return self.search_venues(lat, lon, radius_miles, artist_genre, artist_setup, originals_only)
+        return self.search_venues(lat, lon, radius_miles, artist_genre, artist_setup, artist_category, originals_only)
 
 
 # --- DEMO EXECUTION ---
@@ -297,23 +357,32 @@ if __name__ == "__main__":
             print("No venues found under those terms.")
         for r in results:
             print(f"{r['venue_name']} — {r['city']} — {r['distance_miles']} mi away")
-            print(f"  Match: {r['match_score_pct']}%  |  Content: {r['content_policy']}  |  Pay: {r['pay']}")
+            print(f"  Match: {r['match_score_pct']}%  |  Artist: {r['artist_category']}  |  Content: {r['content_policy']}  |  Pay: {r['pay']}")
             print(f"  Run by: {r['run_by']}  |  Played by: {', '.join(r['played_by']) or 'Not yet recorded'}  |  Vouched by: {', '.join(r['vouched_by']) or 'Not yet recorded'}")
             for reason in r["match_analysis"]:
                 print(f"  - {reason}")
 
     # Rich's own case: originals-only singer-songwriter standing in Lancaster.
     show(
-        "LANCASTER, 25-MILE SEARCH — originals only",
-        matcher.search_by_city("Lancaster, PA", 25, "singer-songwriter", "Acoustic Singer-Songwriter", originals_only=True),
+        "LANCASTER, 25-MILE SEARCH — originals artist",
+        matcher.search_by_city("Lancaster, PA", 25, "singer-songwriter", "Acoustic Singer-Songwriter", artist_category="originals"),
     )
     show(
-        "LANCASTER, 800-MILE SEARCH — originals only",
-        matcher.search_by_city("Lancaster, PA", 800, "singer-songwriter", "Acoustic Singer-Songwriter", originals_only=True),
+        "LANCASTER, 800-MILE SEARCH — originals artist",
+        matcher.search_by_city("Lancaster, PA", 800, "singer-songwriter", "Acoustic Singer-Songwriter", artist_category="originals"),
     )
     # Policy filter proof: the only room within 25 miles of Austin is
-    # covers-only, so an originals-only artist gets no match there.
+    # covers-only, so an originals artist gets no match there — while a
+    # covers artist matches it, and a mixed artist matches it too.
     show(
-        "AUSTIN, 25-MILE SEARCH — originals only (covers-only room must not appear)",
-        matcher.search_by_city("Austin, TX", 25, "singer-songwriter", "Acoustic Singer-Songwriter", originals_only=True),
+        "AUSTIN, 25-MILE SEARCH — originals artist (covers-only room must not appear)",
+        matcher.search_by_city("Austin, TX", 25, "singer-songwriter", "Acoustic Singer-Songwriter", artist_category="originals"),
+    )
+    show(
+        "AUSTIN, 25-MILE SEARCH — covers artist (the covers-only room appears)",
+        matcher.search_by_city("Austin, TX", 25, "singer-songwriter", "Acoustic Singer-Songwriter", artist_category="covers"),
+    )
+    show(
+        "AUSTIN, 25-MILE SEARCH — mixed artist (any room fits)",
+        matcher.search_by_city("Austin, TX", 25, "singer-songwriter", "Acoustic Singer-Songwriter", artist_category="mixed"),
     )
