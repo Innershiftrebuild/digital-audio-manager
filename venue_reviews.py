@@ -20,7 +20,7 @@ DAM_BANNER = r"""
 |   _   _ _____    _    _   _____ _   ___     _______ _   _  ___  __  __   |
 |  | | | | ____|  / \  | | |_   _| | | \ \   / / ____| \ | |/ _ \|  \/  |  |
 |  | |_| |  _|   / _ \ | |   | | |_| |\ \ / /|  _| |  \| | | | | |\/| |  |
-|  |  |  _  | |___ / ___ \| |___| | |  _  | \ V / | |___| |\  | |_| | |  | |  |
+|  |  _  | |___ / ___ \| |___| | |  _  | \ V / | |___| |\  | |_| | |  | |  |
 |  |_| |_|_____/_/   \_\_____|_| |_| |_|  \_/  |_____|_| \_|\___/|_|  |_|  |
 |                                                                          |
 |               The DAM / BookedStage - Sanitas Mentis Inc.                |
@@ -55,15 +55,17 @@ class DAMVenueReviews:
     4. RATINGS ARE THE CROWD'S WORD. The average rating, the
        would-play-again share, and the pay-as-promised share are what
        musicians said after their gigs. They are never the trusted badge.
-    5. THE TRUSTED BADGE IS A FIRSTHAND VOUCH. A room earns the trusted
-       badge only when a named musician vouches for it firsthand
-       (vouched_by in venue_matching.py). Ratings never confer the badge,
-       and the badge never stands in for ratings. The two never stand in
-       for each other.
+    5. THE TRUSTED BADGE IS A FIRSTHAND VOUCH — FROM SOMEONE WHO PLAYED
+       THE ROOM. A room earns the trusted badge only when a named
+       musician vouches for it firsthand (vouched_by in
+       venue_matching.py) AND that musician is recorded as having played
+       the room (played_by). A vouch from someone who never played there
+       does not count. Ratings never confer the badge, and the badge
+       never stands in for ratings. The two never stand in for each other.
 
-    This module records how gigs went. Whether a candidate room goes live
-    as an unverified listing, or only once vouched, is still Rich's call —
-    the listing rule lives outside this module.
+    This module records how gigs went. The listing rule, as Rich ruled
+    it 2026-11-24: candidate rooms go live marked unverified, and the
+    trusted badge comes only from a named firsthand vouch (see rule 5).
     """
 
     RATING_MIN = 1
@@ -216,15 +218,38 @@ class DAMVenueReviews:
     # ---------- the trusted badge (firsthand vouch, not ratings) ----------
 
     @staticmethod
-    def trusted_badge(vouched_by: List[str]) -> bool:
+    def verified_vouches(vouched_by: List[str], played_by: List[str]) -> List[str]:
         """
-        True only when a named musician vouches for the room firsthand.
-        Ratings never confer the badge. Pass the room's vouched_by list
-        from venue_matching.py — an empty list means no badge.
+        The vouches that count: names in BOTH lists — a named musician
+        who verifiably played the room. A vouch from someone who never
+        played there does not count. Matching ignores case and
+        surrounding spaces.
         """
-        return bool(vouched_by) and all(
-            isinstance(name, str) and name.strip() for name in vouched_by
-        )
+        played = {
+            name.strip().lower()
+            for name in (played_by or [])
+            if isinstance(name, str) and name.strip()
+        }
+        verified: List[str] = []
+        for name in vouched_by or []:
+            if (
+                isinstance(name, str)
+                and name.strip()
+                and name.strip().lower() in played
+                and name.strip() not in verified
+            ):
+                verified.append(name.strip())
+        return verified
+
+    @staticmethod
+    def trusted_badge(vouched_by: List[str], played_by: List[str]) -> bool:
+        """
+        True only when a named musician who verifiably played the room
+        vouches for it firsthand — at least one name in BOTH vouched_by
+        and played_by (from venue_matching.py). Ratings never confer the
+        badge.
+        """
+        return bool(DAMVenueReviews.verified_vouches(vouched_by, played_by))
 
 
 # --- DEMO EXECUTION ---
@@ -275,5 +300,6 @@ if __name__ == "__main__":
         print(f"Would play again: {summary['would_play_again_pct']}%  |  Pay as promised: {summary['pay_as_promised_pct']}%")
         if summary["latest_note"]:
             print(f"Latest word: \"{summary['latest_note']}\"")
-        print(f"Trusted badge (firsthand vouch): {DAMVenueReviews.trusted_badge(['Sample Busker'])}")
-        print(f"Trusted badge (no vouch): {DAMVenueReviews.trusted_badge([])}")
+        print(f"Trusted badge (vouched + played): {DAMVenueReviews.trusted_badge(['Sample Busker'], ['Sample Busker'])}")
+        print(f"Trusted badge (vouched, never played): {DAMVenueReviews.trusted_badge(['Sample Busker'], ['Other Musician'])}")
+        print(f"Trusted badge (no vouch): {DAMVenueReviews.trusted_badge([], ['Sample Busker'])}")
